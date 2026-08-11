@@ -21,18 +21,10 @@ See [_Sharing Archives under MacPorts 2_ on the MacPorts wiki](https://trac.macp
 
 ## Configure client
 
-Assuming the server has the Bonjour/Zeroconf hostname `Spektr.local`:
+Assuming the server has the Bonjour/Zeroconf hostname `Spektr.local`, on another machine:
 
-1. `curl http://Spektr.local:6227/pubkey.pem -o /opt/local/share/macports/keys/archives/spektr-local-pub.pem`
+`sudo ./add-macports-archive-source.sh Spektr.local`
 
-2. Add `/opt/local/share/macports/keys/archives/spektr-local-pub.pem` to `/opt/local/etc/macports/pubkeys.conf`
-
-3. Add the following to `/opt/local/etc/macports/archive_sites.conf`
-
-```
-name    Spektr.local
-urls    http://Spektr.local:6227/
-```
 
 ## Features and Antifeatures
 
