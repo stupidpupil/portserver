@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>KeepAlive</key>
+  <true/>
+  <key>Label</key>
+  <string>org.github.portserver</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+      <key>PYTHONUNBUFFERED</key>
+      <string>1</string>
+  </dict>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/local/bin/portserver.py</string>
+    <string>/opt/local/share/macports/keys/portserver/local.pem</string>
+    <string>/opt/local/var/macports/software</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/opt/local/var/macports/software</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>Sockets</key>
+  <dict>
+    <key>portserver-http</key>
+    <dict>
+      <key>SockNodeName</key>
+      <string>0.0.0.0</string>
+      <key>SockServiceName</key>
+      <string>6227</string>
+    </dict>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/tmp/org.github.portserver.stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/org.github.portserver.stderr.log</string>
+  <key>UserName</key>
+  <string>macports</string>
+</dict>
+</plist>
+
