@@ -1,6 +1,6 @@
 # portserver
 
-A single-file server for sharing MacPorts binary archives to other machines. It handles signing archives on-the-fly.
+A single-file server for sharing MacPorts binary archives to other machines that signs archives on-the-fly.
 
 > [!CAUTION]
 > This project includes code produced with a "generative AI". This is documented here for transparency.
@@ -34,6 +34,9 @@ name    Spektr.local
 urls    http://Spektr.local:6227/
 ```
 
-## Security
+## Features and Antifeatures
 
-Probably terrible.
+- Very little consideration given to security, but...
+- Server runs with reduced privileges
+- Attempts to avoid path traversal attacks
+- Limited to `.tbz2` archives and `rmd160` signatures
