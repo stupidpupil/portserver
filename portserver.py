@@ -8,6 +8,16 @@ running as root.
 Usage:
     portserver.py <private-key.pem> <directory>
 
+Key provisioning
+-----------------
+If <private-key.pem> does not already exist, it is generated on the spot
+(via `openssl genrsa`) and written to that path with 0600 permissions, so a
+brand-new install "just works" without a manual key-generation step. Once
+the file exists, it is reused as-is on every subsequent start -- nothing
+about the key is derived from the hostname or any other guessable,
+network-visible value; it's a normal randomly generated RSA key that simply
+persists across restarts.
+
 It serves exactly three kinds of GET requests:
 
     GET /pubkey.pem
@@ -106,11 +116,28 @@ def launch_activate_socket(name):
     return fds
 
 
-class LaunchdHTTPServer(http.server.HTTPServer):
+class LaunchdHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     """
     An HTTPServer that uses a pre-existing, already-bound-and-listening
-    socket (as provided by launchd) instead of creating and binding its own.
+    socket (as provided by launchd) instead of creating and binding its own,
+    and handles each connection on its own thread.
+
+    Threading matters here: with a single-threaded server, one client
+    downloading a large .tbz2 blocks every other client's connection from
+    even being accepted until that transfer finishes. If a queued or
+    stalled client's own timeout fires first, it gives up and closes its
+    socket -- and when this server eventually gets around to writing to
+    that now-abandoned connection, the write fails with a BrokenPipeError.
+    Threading removes the serialization that causes that in the first
+    place. It's safe here because all server-level state (base_dir,
+    private_key_path, pubkey_pem) is set once before serve_forever() is
+    called and never mutated afterward -- there's nothing shared and
+    mutable across request threads to race on.
     """
+
+    # Don't let the process hang at shutdown waiting for slow in-flight
+    # transfers on other threads to finish.
+    daemon_threads = True
 
     def __init__(self, sock, RequestHandlerClass):
         # Deliberately skip TCPServer.__init__ (it would create a fresh
@@ -128,6 +155,22 @@ class LaunchdHTTPServer(http.server.HTTPServer):
 
     def server_activate(self):
         pass  # socket is already listening
+
+    def handle_error(self, request, client_address):
+        # A client closing/resetting its connection mid-request or
+        # mid-response (BrokenPipeError, ConnectionResetError, or our own
+        # 30s handler timeout firing) is routine on a network-facing
+        # server, not a bug -- log one line instead of a full traceback.
+        # Anything else still gets the normal traceback for debugging.
+        exc_value = sys.exc_info()[1]
+        if isinstance(exc_value, (ConnectionError, TimeoutError)):
+            host, port = client_address[0], client_address[1]
+            sys.stderr.write(
+                f"{host}:{port} - connection dropped mid-request "
+                f"({type(exc_value).__name__})\n"
+            )
+            return
+        super().handle_error(request, client_address)
 
 
 # --------------------------------------------------------------------------
@@ -176,6 +219,12 @@ class DistfileRequestHandler(http.server.BaseHTTPRequestHandler):
     server_version = "portserver/1.0"
     protocol_version = "HTTP/1.1"
 
+    # Without this, a client that opens a connection and then sends data
+    # slowly (or not at all) ties up this single-threaded server
+    # indefinitely -- nobody else can be served until that connection is
+    # killed. 30s is generous for LAN clients but bounds the worst case.
+    timeout = 30
+
     def do_GET(self):
         parsed = urllib.parse.urlsplit(self.path)
         path = urllib.parse.unquote(parsed.path)
@@ -203,14 +252,21 @@ class DistfileRequestHandler(http.server.BaseHTTPRequestHandler):
             return
 
         try:
-            size = os.path.getsize(real_path)
             f = open(real_path, "rb")
         except OSError:
             self.send_error(404, "Not Found")
             return
 
         with f:
+            # fstat the already-open fd rather than stat-ing the path
+            # separately, so the reported Content-Length and the bytes we
+            # actually stream can't disagree if the file changes underneath
+            # us between the two calls (TOCTOU).
+            size = os.fstat(f.fileno()).st_size
+
             self.send_response(200)
+            # Matches the mimetype.assign block in the MacPorts reference
+            # lighttpd config: https://trac.macports.org/wiki/howto/ShareArchives2
             self.send_header("Content-Type", "application/x-bzip-compressed-tar")
             self.send_header("Content-Length", str(size))
             self.end_headers()
@@ -250,6 +306,8 @@ class DistfileRequestHandler(http.server.BaseHTTPRequestHandler):
             self.send_error(500, "Internal Server Error")
             return
 
+        # Matches the MacPorts reference lighttpd config, which maps
+        # .rmd160 to "text/binary" (not application/octet-stream).
         self._serve_bytes(result.stdout, "text/binary")
 
     # -- helpers -------------------------------------------------------
@@ -287,6 +345,46 @@ class DistfileRequestHandler(http.server.BaseHTTPRequestHandler):
 # Startup
 # --------------------------------------------------------------------------
 
+def ensure_private_key(private_key_path, key_bits):
+    """
+    If private_key_path doesn't exist yet, generate a fresh RSA private key
+    there (0600, parent dir created 0700 if needed) so the first run of this
+    server "just works" with no manual key-generation step. If it already
+    exists, leave it untouched and reuse it.
+    """
+    if os.path.exists(private_key_path):
+        return
+
+    parent = os.path.dirname(private_key_path) or "."
+    os.makedirs(parent, mode=0o700, exist_ok=True)
+
+    # Write to a temp file in the same directory and rename into place, so a
+    # crash/interrupt mid-generation can't leave a half-written key file
+    # sitting at the real path.
+    tmp_path = private_key_path + f".tmp-{os.getpid()}"
+    try:
+        result = subprocess.run(
+            [OPENSSL, "genrsa", "-out", tmp_path, str(key_bits)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if result.returncode != 0:
+            sys.exit(
+                "error: failed to generate private key: "
+                f"{result.stderr.decode('utf-8', 'replace').strip()}"
+            )
+        os.chmod(tmp_path, 0o600)
+        os.rename(tmp_path, private_key_path)
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+    print(
+        f"generated new {key_bits}-bit RSA private key at {private_key_path}",
+        file=sys.stderr,
+    )
+
+
 def load_public_key_pem(private_key_path):
     result = subprocess.run(
         [OPENSSL, "rsa", "-in", private_key_path, "-pubout"],
@@ -306,11 +404,22 @@ def main():
         description="Serve MacPorts-style .tbz2 distfiles and on-the-fly "
         ".tbz2.rmd160 signatures over a launchd-activated socket."
     )
-    parser.add_argument("private_key", help="path to an RSA private key (PEM)")
+    parser.add_argument(
+        "private_key",
+        help="path to an RSA private key (PEM); generated automatically here "
+        "on first run if it doesn't already exist",
+    )
     parser.add_argument("directory", help="directory containing .tbz2 files to serve")
+    parser.add_argument(
+        "--key-bits",
+        type=int,
+        default=2048,
+        help="RSA key size to use when auto-generating a new private key (default: 2048)",
+    )
     args = parser.parse_args()
 
     private_key_path = os.path.abspath(args.private_key)
+    ensure_private_key(private_key_path, args.key_bits)
     if not os.path.isfile(private_key_path):
         sys.exit(f"error: {private_key_path} is not a file")
 
